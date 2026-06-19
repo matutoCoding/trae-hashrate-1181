@@ -14,6 +14,7 @@ import {
   Settings,
   Clock,
   Trash2,
+  Plus,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useWaitlistStore } from '@/stores/waitlist';
@@ -23,6 +24,7 @@ import { useCourseStore } from '@/stores/course';
 import { useTeacherStore } from '@/stores/teacher';
 import { useStudentStore } from '@/stores/student';
 import Avatar from '@/components/Avatar';
+import Modal from '@/components/Modal';
 import type { Waitlist, Notification, Student, Course } from '@/mock/data';
 
 const positionStyles: Record<number, string> = {
@@ -347,8 +349,12 @@ export default function Waitlist() {
   const [expandedCourses, setExpandedCourses] = useState<Set<string>>(
     new Set()
   );
+  const [registerModal, setRegisterModal] = useState(false);
+  const [registerCourseId, setRegisterCourseId] = useState('');
+  const [registerStudentId, setRegisterStudentId] = useState('');
 
   const waitlists = useWaitlistStore((s) => s.waitlists);
+  const joinWaitlist = useWaitlistStore((s) => s.joinWaitlist);
   const notifyFirstInLine = useWaitlistStore((s) => s.notifyFirstInLine);
   const confirmWaitlistEntry = useWaitlistStore(
     (s) => s.confirmWaitlistEntry
@@ -363,8 +369,10 @@ export default function Waitlist() {
   const getUnreadCount = useNotificationStore((s) => s.getUnreadCount);
 
   const createBooking = useBookingStore((s) => s.createBooking);
+  const isStudentBooked = useBookingStore((s) => s.isStudentBooked);
 
   const courses = useCourseStore((s) => s.courses);
+  const getAvailableSlots = useCourseStore((s) => s.getAvailableSlots);
   const teachers = useTeacherStore((s) => s.teachers);
   const students = useStudentStore((s) => s.students);
 
@@ -438,13 +446,37 @@ export default function Waitlist() {
     markAsRead(notification.id);
     if (notification.relatedId) {
       const entry = waitlists.find((w) => w.id === notification.relatedId);
-      if (entry && confirmWaitlistEntry(entry.id)) {
+      if (!entry) return;
+
+      const course = courses.find((c) => c.id === entry.courseId);
+      const student = studentMap[entry.studentId];
+
+      const availableSlots = getAvailableSlots(entry.courseId);
+      if (availableSlots <= 0) {
+        pushNotification(
+          '系统',
+          '补位失败',
+          `「${course?.title || '课程'}」暂无空余名额，补位失败。`,
+          entry.id
+        );
+        return;
+      }
+
+      if (isStudentBooked(entry.courseId, entry.studentId)) {
+        pushNotification(
+          '系统',
+          '补位失败',
+          `学员「${student?.name || '该学员'}」已预约「${course?.title || '课程'}」，请勿重复预约。`,
+          entry.id
+        );
+        return;
+      }
+
+      if (confirmWaitlistEntry(entry.id)) {
         createBooking({
           courseId: entry.courseId,
           studentId: entry.studentId,
         });
-        const student = studentMap[entry.studentId];
-        const course = courses.find((c) => c.id === entry.courseId);
         if (student && course) {
           pushNotification(
             '系统',
@@ -489,6 +521,47 @@ export default function Waitlist() {
     }
   };
 
+  const handleOpenRegister = (courseId?: string) => {
+    setRegisterCourseId(courseId || '');
+    setRegisterStudentId('');
+    setRegisterModal(true);
+  };
+
+  const handleRegisterSubmit = () => {
+    if (!registerCourseId || !registerStudentId) return;
+
+    const result = joinWaitlist(registerCourseId, registerStudentId);
+    if (result) {
+      const student = studentMap[registerStudentId];
+      const course = courses.find((c) => c.id === registerCourseId);
+      if (student && course) {
+        pushNotification(
+          '系统',
+          '候补登记成功',
+          `学员「${student.name}」已成功加入「${course.title}」的候补队列，当前顺位第 ${result.position} 位。`,
+          result.id
+        );
+        setExpandedCourses((prev) => {
+          const next = new Set(prev);
+          next.add(registerCourseId);
+          return next;
+        });
+      }
+    } else {
+      const student = studentMap[registerStudentId];
+      const course = courses.find((c) => c.id === registerCourseId);
+      if (student && course) {
+        pushNotification(
+          '系统',
+          '候补登记失败',
+          `学员「${student.name}」已在「${course.title}」的候补队列中，无需重复登记。`,
+          registerCourseId
+        );
+      }
+    }
+    setRegisterModal(false);
+  };
+
   const unreadCount = getUnreadCount();
 
   return (
@@ -507,9 +580,18 @@ export default function Waitlist() {
           <div className="space-y-4 lg:col-span-3">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold text-ink">候补队列</h2>
-              <span className="text-xs text-ink/50">
-                共 {waitlistByCourse.size} 个课程有候补
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-ink/50">
+                  共 {waitlistByCourse.size} 个课程有候补
+                </span>
+                <button
+                  onClick={() => handleOpenRegister()}
+                  className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-cinnabar to-cinnabar/90 px-3.5 py-1.5 text-xs font-medium text-white shadow-sm shadow-cinnabar/20 transition-all hover:shadow-md hover:shadow-cinnabar/30 active:scale-[0.98]"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  登记候补
+                </button>
+              </div>
             </div>
             {Array.from(waitlistByCourse.entries()).length === 0 ? (
               <div className="rounded-2xl border border-dashed border-ink/15 bg-white/60 py-16 text-center">
@@ -593,6 +675,86 @@ export default function Waitlist() {
           </div>
         </div>
       </div>
+
+      <Modal
+        open={registerModal}
+        onClose={() => setRegisterModal(false)}
+        title="登记候补"
+        footer={
+          <div className="flex justify-end gap-3">
+            <button
+              onClick={() => setRegisterModal(false)}
+              className="rounded-lg border border-ink/15 px-4 py-2 text-sm font-medium text-ink/60 transition-all hover:bg-ink/5"
+            >
+              取消
+            </button>
+            <button
+              onClick={handleRegisterSubmit}
+              disabled={!registerCourseId || !registerStudentId}
+              className={cn(
+                'rounded-lg px-5 py-2 text-sm font-medium text-white transition-all',
+                registerCourseId && registerStudentId
+                  ? 'bg-gradient-to-r from-cinnabar to-cinnabar/90 hover:shadow-md hover:shadow-cinnabar/20 active:scale-[0.98]'
+                  : 'bg-ink/20 cursor-not-allowed'
+              )}
+            >
+              确认登记
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-5 py-2">
+          <div>
+            <label className="mb-2 block text-sm font-medium text-ink">
+              选择课程
+            </label>
+            <select
+              value={registerCourseId}
+              onChange={(e) => setRegisterCourseId(e.target.value)}
+              className="w-full rounded-lg border border-ink/15 bg-white px-4 py-2.5 text-sm text-ink transition-all focus:border-cinnabar focus:outline-none focus:ring-2 focus:ring-cinnabar/20"
+            >
+              <option value="">-- 请选择课程 --</option>
+              {courses
+                .filter((c) => c.status !== '已结束' && c.status !== '已取消')
+                .map((course) => {
+                  const teacher = teacherMap[course.teacherId];
+                  const slots = getAvailableSlots(course.id);
+                  return (
+                    <option key={course.id} value={course.id}>
+                      {course.title} · {course.date} {course.startTime} · {teacher?.name || '未分配'} · {slots > 0 ? `余${slots}位` : '已满'}
+                    </option>
+                  );
+                })}
+            </select>
+          </div>
+          <div>
+            <label className="mb-2 block text-sm font-medium text-ink">
+              选择学员
+            </label>
+            <select
+              value={registerStudentId}
+              onChange={(e) => setRegisterStudentId(e.target.value)}
+              className="w-full rounded-lg border border-ink/15 bg-white px-4 py-2.5 text-sm text-ink transition-all focus:border-cinnabar focus:outline-none focus:ring-2 focus:ring-cinnabar/20"
+            >
+              <option value="">-- 请选择学员 --</option>
+              {students.map((student) => (
+                <option key={student.id} value={student.id}>
+                  {student.name} · {student.level} · 目标：{student.targetStyles.join('、')}
+                </option>
+              ))}
+            </select>
+          </div>
+          {registerCourseId && (
+            <div className="rounded-lg bg-rice/50 border border-rice/60 p-3">
+              <p className="text-xs text-ink/60">
+                <span className="font-medium text-ink">登记说明：</span>
+                加入候补队列后，若有名额释放将按顺位自动通知。
+                您可以在「候补队列」中查看当前顺位和等待时长。
+              </p>
+            </div>
+          )}
+        </div>
+      </Modal>
     </div>
   );
 }

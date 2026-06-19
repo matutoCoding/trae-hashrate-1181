@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { Course, mockCourses } from '../mock/data';
+import { useBookingStore } from './booking';
 
 interface CourseState {
   courses: Course[];
@@ -19,6 +20,7 @@ interface CourseState {
   getCoursesByStyle: (style: string) => Course[];
   getCourseById: (id: string) => Course | undefined;
   getWeekCourses: (baseDate?: string) => Course[];
+  getAvailableSlots: (courseId: string) => number;
 }
 
 const formatDate = (d: Date) => d.toISOString().split('T')[0];
@@ -107,6 +109,13 @@ export const useCourseStore = create<CourseState>()(
           formatDate(monday),
           formatDate(sunday)
         );
+      },
+
+      getAvailableSlots: (courseId) => {
+        const course = get().getCourseById(courseId);
+        if (!course) return 0;
+        const bookingCount = useBookingStore.getState().getBookingCountByCourse(courseId);
+        return Math.max(0, course.maxStudents - bookingCount);
       },
     }),
     {

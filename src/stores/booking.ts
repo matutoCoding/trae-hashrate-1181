@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { Booking, mockBookings } from '../mock/data';
+import { useCourseStore } from './course';
+import { parseCourseDateTime } from '../utils/time';
 
 interface BookingState {
   bookings: Booking[];
@@ -19,6 +21,7 @@ interface BookingState {
   getActiveBookingsByCourse: (courseId: string) => Booking[];
   getBookingCountByCourse: (courseId: string) => number;
   isStudentBooked: (courseId: string, studentId: string) => boolean;
+  getRemainingCheckInTime: (courseId: string, bookingId: string) => number;
 }
 
 const formatDateTime = (d: Date) =>
@@ -87,14 +90,24 @@ export const useBookingStore = create<BookingState>()(
         const now = new Date();
         const releasedIds: string[] = [];
         const currentBookings = get().bookings;
+        const courseStore = useCourseStore.getState();
 
         currentBookings.forEach((booking) => {
           if (booking.status !== '已预约') return;
+
+          const course = courseStore.getCourseById(booking.courseId);
+          if (!course) return;
+
+          const courseStartDate = parseCourseDateTime(course.date, course.startTime);
+          const checkInOpenTime = new Date(courseStartDate.getTime() - 30 * 60 * 1000);
+
+          if (now < checkInOpenTime) return;
+
           const bookedAt = new Date(booking.bookedAt.replace(' ', 'T'));
-          const timeoutTime = new Date(
-            bookedAt.getTime() + booking.timeoutMinutes * 60 * 1000
-          );
-          if (now >= timeoutTime) {
+          const bookedPlus15 = new Date(bookedAt.getTime() + booking.timeoutMinutes * 60 * 1000);
+          const timeoutDeadline = bookedPlus15.getTime() > courseStartDate.getTime() ? bookedPlus15 : courseStartDate;
+
+          if (now >= timeoutDeadline) {
             releasedIds.push(booking.id);
           }
         });
@@ -132,6 +145,34 @@ export const useBookingStore = create<BookingState>()(
         get()
           .getActiveBookingsByCourse(courseId)
           .some((b) => b.studentId === studentId),
+
+      getRemainingCheckInTime: (courseId, bookingId) => {
+        const courseStore = useCourseStore.getState();
+        const course = courseStore.getCourseById(courseId);
+        const booking = get().getBookingById(bookingId);
+
+        if (!course || !booking || booking.status !== '已预约') {
+          return 0;
+        }
+
+        const courseStartDate = parseCourseDateTime(course.date, course.startTime);
+        const checkInOpenTime = new Date(courseStartDate.getTime() - 30 * 60 * 1000);
+        const now = new Date();
+
+        if (now < checkInOpenTime) {
+          return checkInOpenTime.getTime() - now.getTime();
+        }
+
+        const bookedAt = new Date(booking.bookedAt.replace(' ', 'T'));
+        const bookedPlus15 = new Date(bookedAt.getTime() + booking.timeoutMinutes * 60 * 1000);
+        const timeoutDeadline = bookedPlus15.getTime() > courseStartDate.getTime() ? bookedPlus15 : courseStartDate;
+
+        if (now >= timeoutDeadline) {
+          return 0;
+        }
+
+        return timeoutDeadline.getTime() - now.getTime();
+      },
     }),
     {
       name: 'booking-store',
