@@ -22,6 +22,7 @@ interface BookingState {
   getBookingCountByCourse: (courseId: string) => number;
   isStudentBooked: (courseId: string, studentId: string) => boolean;
   getRemainingCheckInTime: (courseId: string, bookingId: string) => number;
+  batchCheckIn: (bookingIds: string[]) => number;
 }
 
 const formatDateTime = (d: Date) =>
@@ -172,6 +173,24 @@ export const useBookingStore = create<BookingState>()(
         }
 
         return timeoutDeadline.getTime() - now.getTime();
+      },
+
+      batchCheckIn: (bookingIds) => {
+        let successCount = 0;
+        const nowStr = formatDateTime(new Date());
+        set((state) => ({
+          bookings: state.bookings.map((b) => {
+            if (!bookingIds.includes(b.id)) {
+              return b;
+            }
+            if (b.status !== '已预约') {
+              return b;
+            }
+            successCount++;
+            return { ...b, status: '已签到', checkInAt: nowStr };
+          }),
+        }));
+        return successCount;
       },
     }),
     {

@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, forwardRef } from 'react';
+import { useState, useMemo, useRef, forwardRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   ChevronDown,
@@ -19,6 +19,10 @@ import {
   Filter,
   RefreshCw,
   Sparkles,
+  SkipForward,
+  AlertTriangle,
+  CheckCheck,
+  MapPin,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useWaitlistStore } from '@/stores/waitlist';
@@ -27,6 +31,7 @@ import { useBookingStore } from '@/stores/booking';
 import { useCourseStore } from '@/stores/course';
 import { useTeacherStore } from '@/stores/teacher';
 import { useStudentStore } from '@/stores/student';
+import { useMatchStore } from '@/stores/match';
 import Avatar from '@/components/Avatar';
 import Modal from '@/components/Modal';
 import type { Waitlist, Notification, Student, Course } from '@/mock/data';
@@ -194,6 +199,7 @@ const CourseGroup = forwardRef<
     students: Record<string, Student>;
     onNotify: (id: string) => void;
     onCancel: (id: string) => void;
+    highlighted?: boolean;
   }
 >(function CourseGroup(
   {
@@ -205,6 +211,7 @@ const CourseGroup = forwardRef<
     students,
     onNotify,
     onCancel,
+    highlighted,
   },
   ref
 ) {
@@ -215,7 +222,12 @@ const CourseGroup = forwardRef<
   return (
     <div
       ref={ref}
-      className="overflow-hidden rounded-2xl border border-ink/10 bg-white shadow-sm"
+      className={cn(
+        'overflow-hidden rounded-2xl border bg-white shadow-sm transition-all',
+        highlighted
+          ? 'border-cinnabar/50 ring-2 ring-cinnabar/20 animate-pulse'
+          : 'border-ink/10'
+      )}
     >
       <button
         onClick={onToggle}
@@ -226,6 +238,12 @@ const CourseGroup = forwardRef<
             <h3 className="truncate text-base font-bold text-ink">
               {course.title}
             </h3>
+            {highlighted && (
+              <span className="inline-flex items-center gap-1 shrink-0 rounded-md bg-cinnabar/15 px-2 py-0.5 text-xs font-medium text-cinnabar">
+                <MapPin className="h-3 w-3" />
+                已定位
+              </span>
+            )}
             <span className="shrink-0 rounded-md bg-bamboo/10 px-2 py-0.5 text-xs font-medium text-bamboo">
               {course.style}
             </span>
@@ -287,6 +305,7 @@ function NotificationItem({
   onRead,
   onClick,
   showActions,
+  hasJumped,
 }: {
   notification: Notification;
   onConfirm?: () => void;
@@ -294,6 +313,7 @@ function NotificationItem({
   onRead: () => void;
   onClick?: () => void;
   showActions: boolean;
+  hasJumped?: boolean;
 }) {
   const config = notificationTypeConfig[notification.type];
   const Icon = config.icon;
@@ -308,7 +328,7 @@ function NotificationItem({
     <div
       onClick={handleClick}
       className={cn(
-        'rounded-xl border p-4 transition-all cursor-pointer',
+        'rounded-xl border p-4 transition-all cursor-pointer relative',
         notification.isRead
           ? 'border-ink/8 bg-white/70'
           : 'border-cinnabar/20 bg-cinnabar/[0.03] shadow-sm'
@@ -325,14 +345,22 @@ function NotificationItem({
         </div>
         <div className="min-w-0 flex-1 space-y-1.5">
           <div className="flex items-start justify-between gap-2">
-            <h4
-              className={cn(
-                'text-sm font-semibold truncate',
-                notification.isRead ? 'text-ink/80' : 'text-ink'
+            <div className="flex items-center gap-2 min-w-0">
+              <h4
+                className={cn(
+                  'text-sm font-semibold truncate',
+                  notification.isRead ? 'text-ink/80' : 'text-ink'
+                )}
+              >
+                {notification.title}
+              </h4>
+              {hasJumped && (
+                <span className="inline-flex items-center gap-0.5 shrink-0 rounded-full bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600">
+                  <span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
+                  已跳转
+                </span>
               )}
-            >
-              {notification.title}
-            </h4>
+            </div>
             {!notification.isRead && (
               <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-cinnabar" />
             )}
@@ -369,6 +397,26 @@ function NotificationItem({
 
 type WaitTimeFilter = 'all' | '1h' | '24h' | '3d';
 type NotificationFilter = '全部' | '补位' | '系统' | '撮合';
+type QueueTab = 'waitlist' | 'timeout';
+
+const getTimeoutDuration = (notifiedAt: string): string => {
+  const now = new Date().getTime();
+  const notified = new Date(notifiedAt.replace(' ', 'T')).getTime();
+  const diffMs = now - notified;
+  const diffMins = Math.floor(diffMs / (1000 * 60));
+  if (diffMins < 60) {
+    return `${diffMins} 分钟`;
+  }
+  const hours = Math.floor(diffMins / 60);
+  const mins = diffMins % 60;
+  return `${hours} 小时 ${mins} 分`;
+};
+
+const isOver15Minutes = (notifiedAt: string): boolean => {
+  const now = new Date().getTime();
+  const notified = new Date(notifiedAt.replace(' ', 'T')).getTime();
+  return now - notified >= 15 * 60 * 1000;
+};
 
 export default function Waitlist() {
   const navigate = useNavigate();
@@ -380,7 +428,29 @@ export default function Waitlist() {
   const [registerStudentId, setRegisterStudentId] = useState('');
   const [waitTimeFilter, setWaitTimeFilter] = useState<WaitTimeFilter>('all');
   const [notificationFilter, setNotificationFilter] =
-    useState<NotificationFilter>('全部');
+    useState<NotificationFilter>(() => {
+      if (typeof window !== 'undefined') {
+        const saved = sessionStorage.getItem('notificationFilter');
+        if (saved === '全部' || saved === '补位' || saved === '系统' || saved === '撮合') {
+          return saved;
+        }
+      }
+      return '全部';
+    });
+  const [activeQueueTab, setActiveQueueTab] = useState<QueueTab>('waitlist');
+  const [processedTimeoutIds, setProcessedTimeoutIds] = useState<Set<string>>(new Set());
+  const [highlightCourseId, setHighlightCourseId] = useState<string | null>(null);
+  const [jumpedNotificationIds, setJumpedNotificationIds] = useState<Set<string>>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = sessionStorage.getItem('jumpedNotificationIds');
+        return saved ? new Set(JSON.parse(saved)) : new Set();
+      } catch {
+        return new Set();
+      }
+    }
+    return new Set();
+  });
   const courseRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const waitlists = useWaitlistStore((s) => s.waitlists);
@@ -409,6 +479,7 @@ export default function Waitlist() {
   const getAvailableSlots = useCourseStore((s) => s.getAvailableSlots);
   const teachers = useTeacherStore((s) => s.teachers);
   const students = useStudentStore((s) => s.students);
+  const getMatchById = useMatchStore((s) => s.getMatchById);
 
   const teacherMap = useMemo(
     () => Object.fromEntries(teachers.map((t) => [t.id, t])),
@@ -455,6 +526,45 @@ export default function Waitlist() {
     });
   }, [notifications, notificationFilter]);
 
+  const timeoutQueue = useMemo(() => {
+    return waitlists
+      .filter(
+        (w) =>
+          w.status === '已通知' &&
+          w.notifiedAt &&
+          isOver15Minutes(w.notifiedAt)
+      )
+      .sort((a, b) => {
+        if (!a.notifiedAt || !b.notifiedAt) return 0;
+        return (
+          new Date(a.notifiedAt.replace(' ', 'T')).getTime() -
+          new Date(b.notifiedAt.replace(' ', 'T')).getTime()
+        );
+      });
+  }, [waitlists]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem('notificationFilter', notificationFilter);
+    }
+  }, [notificationFilter]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem(
+        'jumpedNotificationIds',
+        JSON.stringify(Array.from(jumpedNotificationIds))
+      );
+    }
+  }, [jumpedNotificationIds]);
+
+  useEffect(() => {
+    if (highlightCourseId) {
+      const timer = setTimeout(() => setHighlightCourseId(null), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [highlightCourseId]);
+
   const toggleCourse = (courseId: string) => {
     setExpandedCourses((prev) => {
       const next = new Set(prev);
@@ -473,6 +583,7 @@ export default function Waitlist() {
       next.add(courseId);
       return next;
     });
+    setHighlightCourseId(courseId);
     setTimeout(() => {
       const el = courseRefs.current.get(courseId);
       if (el) {
@@ -528,12 +639,25 @@ export default function Waitlist() {
 
   const handleNotificationClick = (notification: Notification) => {
     if (!notification.relatedId) return;
+
+    setJumpedNotificationIds((prev) => {
+      const next = new Set(prev);
+      next.add(notification.id);
+      return next;
+    });
+
     if (notification.type === '补位') {
       const entry = getWaitlistById(notification.relatedId);
       if (entry) {
         expandAndScrollToCourse(entry.courseId);
       }
-    } else if (notification.type === '系统' || notification.type === '撮合') {
+    } else if (notification.type === '撮合') {
+      const match = getMatchById(notification.relatedId);
+      if (match) {
+        sessionStorage.setItem('highlightMatchId', match.id);
+        navigate('/archive');
+      }
+    } else if (notification.type === '系统') {
       const relatedId = notification.relatedId;
       const course = courses.find((c) => c.id === relatedId);
       if (course) {
@@ -659,6 +783,47 @@ export default function Waitlist() {
     }
   };
 
+  const handleSkipTimeout = (waitlistId: string) => {
+    const nextNotified = skipWaitlistEntry(waitlistId);
+    setProcessedTimeoutIds((prev) => {
+      const next = new Set(prev);
+      next.add(waitlistId);
+      return next;
+    });
+    const entry = waitlists.find((w) => w.id === waitlistId);
+    if (entry) {
+      const student = studentMap[entry.studentId];
+      const course = courses.find((c) => c.id === entry.courseId);
+      if (student && course) {
+        pushNotification(
+          '系统',
+          '超时顺延处理',
+          `学员「${student.name}」在「${course.title}」的补位通知超时未响应，已顺延至下一位候补学员。`,
+          entry.id
+        );
+      }
+    }
+    if (nextNotified) {
+      const nextStudent = studentMap[nextNotified.studentId];
+      const course = courses.find((c) => c.id === nextNotified.courseId);
+      if (nextStudent && course) {
+        pushNotification(
+          '补位',
+          `${course.title}补位通知`,
+          `学员「${nextStudent.name}」已被通知补位，请等待学员确认。`,
+          nextNotified.id
+        );
+      }
+    }
+  };
+
+  const handleBatchSkipTimeout = () => {
+    const toProcess = timeoutQueue.filter(
+      (w) => !processedTimeoutIds.has(w.id)
+    );
+    toProcess.forEach((w) => handleSkipTimeout(w.id));
+  };
+
   const handleOpenRegister = (courseId?: string) => {
     setRegisterCourseId(courseId || '');
     setRegisterStudentId('');
@@ -717,84 +882,248 @@ export default function Waitlist() {
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
           <div className="space-y-4 lg:col-span-3">
             <div className="space-y-3">
-              <div className="flex items-center justify-between flex-wrap gap-3">
-                <div className="flex items-center gap-3 flex-wrap">
-                  <h2 className="text-lg font-semibold text-ink">候补队列</h2>
-                  <span className="text-xs text-ink/50">
-                    共 {waitlistByCourse.size} 个课程有候补
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <div className="flex items-center gap-1.5 rounded-lg border border-ink/15 bg-white px-2 py-1">
-                    <Filter className="h-3.5 w-3.5 text-ink/50" />
-                    <select
-                      value={waitTimeFilter}
-                      onChange={(e) =>
-                        setWaitTimeFilter(e.target.value as WaitTimeFilter)
-                      }
-                      className="bg-transparent text-xs text-ink/70 focus:outline-none cursor-pointer pr-1"
-                    >
-                      <option value="all">全部</option>
-                      <option value="1h">1小时内</option>
-                      <option value="24h">24小时内</option>
-                      <option value="3d">3天以上</option>
-                    </select>
+              <div className="flex gap-1 rounded-xl bg-ink/[0.04] p-1">
+                <button
+                  onClick={() => setActiveQueueTab('waitlist')}
+                  className={cn(
+                    'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all flex items-center justify-center gap-2',
+                    activeQueueTab === 'waitlist'
+                      ? 'bg-white text-ink shadow-sm'
+                      : 'text-ink/50 hover:text-ink/70'
+                  )}
+                >
+                  <Users className="h-4 w-4" />
+                  候补队列
+                </button>
+                <button
+                  onClick={() => setActiveQueueTab('timeout')}
+                  className={cn(
+                    'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all flex items-center justify-center gap-2',
+                    activeQueueTab === 'timeout'
+                      ? 'bg-white text-ink shadow-sm'
+                      : 'text-ink/50 hover:text-ink/70'
+                  )}
+                >
+                  <AlertTriangle className="h-4 w-4" />
+                  超时处理队列
+                  {timeoutQueue.filter((w) => !processedTimeoutIds.has(w.id)).length > 0 && (
+                    <span className="rounded-full bg-cinnabar px-1.5 py-0.5 text-[10px] font-bold text-white">
+                      {timeoutQueue.filter((w) => !processedTimeoutIds.has(w.id)).length}
+                    </span>
+                  )}
+                </button>
+              </div>
+
+              {activeQueueTab === 'waitlist' && (
+                <>
+                  <div className="flex items-center justify-between flex-wrap gap-3">
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <h2 className="text-lg font-semibold text-ink">候补队列</h2>
+                      <span className="text-xs text-ink/50">
+                        共 {waitlistByCourse.size} 个课程有候补
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="flex items-center gap-1.5 rounded-lg border border-ink/15 bg-white px-2 py-1">
+                        <Filter className="h-3.5 w-3.5 text-ink/50" />
+                        <select
+                          value={waitTimeFilter}
+                          onChange={(e) =>
+                            setWaitTimeFilter(e.target.value as WaitTimeFilter)
+                          }
+                          className="bg-transparent text-xs text-ink/70 focus:outline-none cursor-pointer pr-1"
+                        >
+                          <option value="all">全部</option>
+                          <option value="1h">1小时内</option>
+                          <option value="24h">24小时内</option>
+                          <option value="3d">3天以上</option>
+                        </select>
+                      </div>
+                      <button
+                        onClick={handleBatchNotify}
+                        className="flex items-center gap-1.5 rounded-lg border border-gold/30 bg-gold/10 px-3 py-1.5 text-xs font-medium text-gold transition-all hover:bg-gold/15"
+                      >
+                        <Megaphone className="h-3.5 w-3.5" />
+                        一键通知下一位
+                      </button>
+                      <button
+                        onClick={handleBatchCleanup}
+                        className="flex items-center gap-1.5 rounded-lg border border-ink/15 bg-white px-3 py-1.5 text-xs font-medium text-ink/60 transition-all hover:border-cinnabar/30 hover:bg-cinnabar/5 hover:text-cinnabar"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        批量清理无效候补
+                      </button>
+                      <button
+                        onClick={() => handleOpenRegister()}
+                        className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-cinnabar to-cinnabar/90 px-3.5 py-1.5 text-xs font-medium text-white shadow-sm shadow-cinnabar/20 transition-all hover:shadow-md hover:shadow-cinnabar/30 active:scale-[0.98]"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        登记候补
+                      </button>
+                    </div>
                   </div>
-                  <button
-                    onClick={handleBatchNotify}
-                    className="flex items-center gap-1.5 rounded-lg border border-gold/30 bg-gold/10 px-3 py-1.5 text-xs font-medium text-gold transition-all hover:bg-gold/15"
-                  >
-                    <Megaphone className="h-3.5 w-3.5" />
-                    一键通知下一位
-                  </button>
-                  <button
-                    onClick={handleBatchCleanup}
-                    className="flex items-center gap-1.5 rounded-lg border border-ink/15 bg-white px-3 py-1.5 text-xs font-medium text-ink/60 transition-all hover:border-cinnabar/30 hover:bg-cinnabar/5 hover:text-cinnabar"
-                  >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                    批量清理无效候补
-                  </button>
-                  <button
-                    onClick={() => handleOpenRegister()}
-                    className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-cinnabar to-cinnabar/90 px-3.5 py-1.5 text-xs font-medium text-white shadow-sm shadow-cinnabar/20 transition-all hover:shadow-md hover:shadow-cinnabar/30 active:scale-[0.98]"
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                    登记候补
-                  </button>
+                </>
+              )}
+
+              {activeQueueTab === 'timeout' && (
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <h2 className="text-lg font-semibold text-ink">超时处理队列</h2>
+                    <span className="text-xs text-ink/50">
+                      共 {timeoutQueue.length} 条超时记录，{timeoutQueue.filter((w) => !processedTimeoutIds.has(w.id)).length} 条待处理
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      onClick={handleBatchSkipTimeout}
+                      disabled={timeoutQueue.filter((w) => !processedTimeoutIds.has(w.id)).length === 0}
+                      className={cn(
+                        'flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all',
+                        timeoutQueue.filter((w) => !processedTimeoutIds.has(w.id)).length > 0
+                          ? 'bg-gradient-to-r from-cinnabar to-cinnabar/90 text-white shadow-sm shadow-cinnabar/20 hover:shadow-md hover:shadow-cinnabar/30 active:scale-[0.98]'
+                          : 'bg-ink/10 text-ink/30 cursor-not-allowed'
+                      )}
+                    >
+                      <SkipForward className="h-3.5 w-3.5" />
+                      一键全部顺延
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
-            {Array.from(waitlistByCourse.entries()).length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-ink/15 bg-white/60 py-16 text-center">
-                <Users className="mx-auto mb-3 h-12 w-12 text-ink/20" />
-                <p className="text-sm text-ink/50">暂无候补学员</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {Array.from(waitlistByCourse.entries()).map(
-                  ([courseId, courseWaitlists]) => {
-                    const course = courses.find(
-                      (c) => c.id === courseId
-                    );
-                    if (!course) return null;
-                    const teacher = teacherMap[course.teacherId];
-                    return (
-                      <CourseGroup
-                        key={courseId}
-                        ref={(el) => setCourseRef(courseId, el)}
-                        course={course}
-                        teacherName={teacher?.name || '未分配'}
-                        waitlists={courseWaitlists}
-                        expanded={expandedCourses.has(courseId)}
-                        onToggle={() => toggleCourse(courseId)}
-                        students={studentMap}
-                        onNotify={handleNotify}
-                        onCancel={handleCancel}
-                      />
-                    );
-                  }
+
+            {activeQueueTab === 'waitlist' && (
+              <>
+                {Array.from(waitlistByCourse.entries()).length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-ink/15 bg-white/60 py-16 text-center">
+                    <Users className="mx-auto mb-3 h-12 w-12 text-ink/20" />
+                    <p className="text-sm text-ink/50">暂无候补学员</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {Array.from(waitlistByCourse.entries()).map(
+                      ([courseId, courseWaitlists]) => {
+                        const course = courses.find(
+                          (c) => c.id === courseId
+                        );
+                        if (!course) return null;
+                        const teacher = teacherMap[course.teacherId];
+                        return (
+                          <CourseGroup
+                            key={courseId}
+                            ref={(el) => setCourseRef(courseId, el)}
+                            course={course}
+                            teacherName={teacher?.name || '未分配'}
+                            waitlists={courseWaitlists}
+                            expanded={expandedCourses.has(courseId)}
+                            onToggle={() => toggleCourse(courseId)}
+                            students={studentMap}
+                            onNotify={handleNotify}
+                            onCancel={handleCancel}
+                            highlighted={highlightCourseId === courseId}
+                          />
+                        );
+                      }
+                    )}
+                  </div>
                 )}
-              </div>
+              </>
+            )}
+
+            {activeQueueTab === 'timeout' && (
+              <>
+                {timeoutQueue.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-ink/15 bg-white/60 py-16 text-center">
+                    <AlertTriangle className="mx-auto mb-3 h-12 w-12 text-ink/20" />
+                    <p className="text-sm text-ink/50">暂无超时记录</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {timeoutQueue.map((w) => {
+                      const course = courses.find((c) => c.id === w.courseId);
+                      const student = studentMap[w.studentId];
+                      const teacher = course ? teacherMap[course.teacherId] : null;
+                      const isProcessed = processedTimeoutIds.has(w.id);
+                      if (!course || !student) return null;
+                      return (
+                        <div
+                          key={w.id}
+                          className={cn(
+                            'flex items-start gap-3 rounded-xl border p-4 transition-all',
+                            isProcessed
+                              ? 'border-ink/8 bg-ink/[0.02] opacity-60'
+                              : 'border-cinnabar/20 bg-cinnabar/[0.02]'
+                          )}
+                        >
+                          <PositionBadge position={w.position} />
+                          <div className="min-w-0 flex-1 space-y-2">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0 flex-1 space-y-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-sm font-semibold text-ink">
+                                    {course.title}
+                                  </span>
+                                  {isProcessed && (
+                                    <span className="inline-flex items-center gap-1 rounded-full bg-ink/15 px-2 py-0.5 text-[10px] font-medium text-ink/60">
+                                      <CheckCheck className="h-3 w-3" />
+                                      已处理
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-2 text-xs text-ink/55 flex-wrap">
+                                  <span className="flex items-center gap-1">
+                                    <User className="h-3 w-3" />
+                                    {student.name}
+                                  </span>
+                                  <span className="flex items-center gap-1">
+                                    <Calendar className="h-3 w-3" />
+                                    {course.date} {course.startTime}
+                                  </span>
+                                  <span>老师：{teacher?.name || '未分配'}</span>
+                                </div>
+                              </div>
+                              <span
+                                className={cn(
+                                  'shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium',
+                                  isProcessed
+                                    ? 'bg-ink/10 text-ink/50'
+                                    : 'bg-cinnabar/15 text-cinnabar'
+                                )}
+                              >
+                                {isProcessed ? '已处理' : '已超时'}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-4 text-xs flex-wrap">
+                              <div className="flex items-center gap-1 text-ink/55">
+                                <Bell className="h-3 w-3" />
+                                通知时间：{w.notifiedAt}
+                              </div>
+                              <div className={cn(
+                                'flex items-center gap-1 font-medium',
+                                isProcessed ? 'text-ink/50' : 'text-cinnabar'
+                              )}>
+                                <Clock className="h-3 w-3" />
+                                已超时：{w.notifiedAt ? getTimeoutDuration(w.notifiedAt) : '-'}
+                              </div>
+                            </div>
+                            {!isProcessed && (
+                              <div className="flex justify-end pt-1">
+                                <button
+                                  onClick={() => handleSkipTimeout(w.id)}
+                                  className="flex items-center gap-1.5 rounded-lg bg-cinnabar px-3 py-1.5 text-xs font-medium text-white transition-all hover:bg-cinnabar/90 active:scale-[0.98]"
+                                >
+                                  <SkipForward className="h-3.5 w-3.5" />
+                                  顺延下一位
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
             )}
           </div>
 
@@ -860,6 +1189,7 @@ export default function Waitlist() {
                       onReject={() => handleRejectNotification(n)}
                       onClick={() => handleNotificationClick(n)}
                       showActions={shouldShowNotificationActions(n)}
+                      hasJumped={jumpedNotificationIds.has(n.id)}
                     />
                   ))
                 )}

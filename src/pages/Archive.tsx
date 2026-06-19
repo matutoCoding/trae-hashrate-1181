@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import {
   ArrowLeftRight,
   Check,
@@ -21,6 +21,7 @@ import {
   FileText,
   Sparkles,
   Filter,
+  MapPin,
 } from 'lucide-react';
 import Modal from '@/components/Modal';
 import StatusBadge from '@/components/StatusBadge';
@@ -182,6 +183,9 @@ export default function Archive() {
   const [archiveSearch, setArchiveSearch] = useState<string>('');
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [exportModal, setExportModal] = useState(false);
+  const [highlightMatchId, setHighlightMatchId] = useState<string | null>(null);
+  const matchRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const archiveMatchRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
 
   const filteredMatches = useMemo(() => {
     return matches.filter((m) => {
@@ -231,6 +235,58 @@ export default function Archive() {
       return next;
     });
   };
+
+  const setMatchRef = (id: string, el: HTMLDivElement | null) => {
+    if (el) {
+      matchRefs.current.set(id, el);
+    } else {
+      matchRefs.current.delete(id);
+    }
+  };
+
+  const setArchiveMatchRef = (id: string, el: HTMLTableRowElement | null) => {
+    if (el) {
+      archiveMatchRefs.current.set(id, el);
+    } else {
+      archiveMatchRefs.current.delete(id);
+    }
+  };
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const storedId = sessionStorage.getItem('highlightMatchId');
+      if (storedId) {
+        sessionStorage.removeItem('highlightMatchId');
+        const match = getMatchById(storedId);
+        if (match) {
+          setHighlightMatchId(storedId);
+          if (match.status === '已归档' || match.status === '已完成' || match.status === '已确认' || match.status === '已拒绝') {
+            setActiveTab('archive');
+            setExpandedRows((prev) => {
+              const next = new Set(prev);
+              next.add(storedId);
+              return next;
+            });
+            setTimeout(() => {
+              const el = archiveMatchRefs.current.get(storedId);
+              if (el) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }
+            }, 100);
+          } else {
+            setActiveTab('match');
+            setTimeout(() => {
+              const el = matchRefs.current.get(storedId);
+              if (el) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }
+            }, 100);
+          }
+          setTimeout(() => setHighlightMatchId(null), 4000);
+        }
+      }
+    }
+  }, [getMatchById]);
 
   const handleSubmitArtwork = () => {
     if (!newArtwork.matchId || !newArtwork.studentId || !newArtwork.title) return;
@@ -373,11 +429,22 @@ export default function Archive() {
                   const teacher = getTeacherById(match.teacherId);
                   const student = getStudentById(match.studentId);
                   if (!teacher || !student) return null;
+                  const isHighlighted = highlightMatchId === match.id;
 
                   return (
                     <div
                       key={match.id}
-                      className="group rounded-2xl border border-ink/10 bg-white p-5 shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:border-cinnabar/20 hover:shadow-xl"
+                      ref={(el) => setMatchRef(match.id, el)}
+                      className={cn(
+                        'group rounded-2xl border bg-white p-5 shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:border-cinnabar/20 hover:shadow-xl',
+                        isHighlighted
+                          ? 'border-cinnabar/50 ring-4 ring-cinnabar/20 shadow-xl shadow-cinnabar/20'
+                          : 'border-ink/10'
+                      )}
+                      style={isHighlighted ? {
+                        animation: 'pulse 2s ease-in-out infinite',
+                        background: 'linear-gradient(135deg, rgba(220, 38, 38, 0.08) 0%, rgba(255, 255, 255, 1) 50%, rgba(220, 38, 38, 0.08) 100%)'
+                      } : undefined}
                     >
                       <div className="flex items-start gap-4">
                         <div className="flex flex-1 items-center gap-3">
@@ -446,11 +513,17 @@ export default function Archive() {
                       </div>
 
                       <div className="mt-4 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <StatusBadge
                             status={matchStatusToBadge(match.status)}
                             showIcon={false}
                           />
+                          {isHighlighted && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-cinnabar/15 px-2.5 py-1 text-xs font-medium text-cinnabar animate-pulse">
+                              <MapPin className="h-3.5 w-3.5" />
+                              已定位
+                            </span>
+                          )}
                           {match.status === '已拒绝' && (
                             <span className="inline-flex items-center gap-1 rounded-full border border-cinnabar/20 bg-cinnabar/10 px-2.5 py-1 text-xs font-medium text-cinnabar">
                               <X className="h-3.5 w-3.5" />
@@ -745,14 +818,22 @@ export default function Archive() {
                           : '-';
                       const expanded = expandedRows.has(match.id);
 
+                      const isMatchHighlighted = highlightMatchId === match.id;
+
                       return (
                         <>
                           <tr
                             key={match.id}
+                            ref={(el) => setArchiveMatchRef(match.id, el)}
                             className={cn(
-                              'transition-colors',
-                              expanded ? 'bg-cinnabar/[0.03]' : 'hover:bg-ink/[0.02]',
+                              'transition-all',
+                              isMatchHighlighted
+                                ? 'bg-cinnabar/10 ring-2 ring-cinnabar/30 ring-inset'
+                                : expanded ? 'bg-cinnabar/[0.03]' : 'hover:bg-ink/[0.02]',
                             )}
+                            style={isMatchHighlighted ? {
+                              animation: 'pulse 2s ease-in-out infinite',
+                            } : undefined}
                           >
                             <td className="px-4 py-3">
                               <button
@@ -771,8 +852,16 @@ export default function Archive() {
                               <div className="text-xs text-ink/40">{match.matchedAt.slice(11, 16)}</div>
                             </td>
                             <td className="px-4 py-3">
-                              <div className="text-sm font-medium text-ink">
-                                {teacher?.styles[0] || '书法'}·{student?.level}班
+                              <div className="flex items-center gap-2">
+                                <div className="text-sm font-medium text-ink">
+                                  {teacher?.styles[0] || '书法'}·{student?.level}班
+                                </div>
+                                {isMatchHighlighted && (
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-cinnabar/15 px-2 py-0.5 text-[10px] font-medium text-cinnabar animate-pulse">
+                                    <MapPin className="h-3 w-3" />
+                                    已定位
+                                  </span>
+                                )}
                               </div>
                             </td>
                             <td className="px-4 py-3">

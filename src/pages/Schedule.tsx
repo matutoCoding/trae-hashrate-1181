@@ -15,6 +15,9 @@ import {
   Timer,
   AlertCircle,
   UserCheck,
+  Search,
+  Download,
+  QrCode,
 } from 'lucide-react';
 import { useCourseStore } from '@/stores/course';
 import { useClassroomStore } from '@/stores/classroom';
@@ -86,7 +89,7 @@ export default function Schedule() {
   const { courses, addCourse, getWeekCourses } = useCourseStore();
   const { classrooms, addClassroom, updateClassroom, deleteClassroom, toggleActive } = useClassroomStore();
   const { teachers } = useTeacherStore();
-  const { bookings, createBooking, checkIn, getActiveBookingsByCourse, getBookingsByCourse } = useBookingStore();
+  const { bookings, createBooking, checkIn, batchCheckIn, getActiveBookingsByCourse, getBookingsByCourse } = useBookingStore();
   const { students } = useStudentStore();
   const { waitlists } = useWaitlistStore();
 
@@ -107,6 +110,9 @@ export default function Schedule() {
   const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
   const [hoveredCourse, setHoveredCourse] = useState<string | null>(null);
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [selectedBookingIds, setSelectedBookingIds] = useState<Set<string>>(new Set());
+  const [scanModalOpen, setScanModalOpen] = useState(false);
+  const [scanSearchQuery, setScanSearchQuery] = useState('');
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -155,6 +161,132 @@ export default function Schedule() {
     if (!selectedCourse) return [];
     return waitlists.filter((w) => w.courseId === selectedCourse.id && w.status === '已补位');
   }, [selectedCourse, waitlists]);
+
+  const today = useMemo(() => formatDate(new Date('2026-06-20')), []);
+
+  const todayCourses = useMemo(() => {
+    return courses.filter((c) => c.date === today);
+  }, [courses, today]);
+
+  const todayCoursesByClassroom = useMemo(() => {
+    const grouped: Record<string, typeof courses> = {};
+    todayCourses.forEach((course) => {
+      if (!grouped[course.classroomId]) {
+        grouped[course.classroomId] = [];
+      }
+      grouped[course.classroomId].push(course);
+    });
+    return grouped;
+  }, [todayCourses]);
+
+  const getCourseStatsForOverview = useMemo(() => {
+    const statsMap: Record<string, { booked: number; checkedIn: number; timeoutReleased: number; waitlistFilled: number }> = {};
+    todayCourses.forEach((course) => {
+      const courseBookings = bookings.filter((b) => b.courseId === course.id);
+      const courseWaitlistFilled = waitlists.filter((w) => w.courseId === course.id && w.status === '已补位').length;
+      statsMap[course.id] = {
+        booked: courseBookings.filter((b) => b.status === '已预约').length,
+        checkedIn: courseBookings.filter((b) => b.status === '已签到').length,
+        timeoutReleased: courseBookings.filter((b) => b.status === '超时释放').length,
+        waitlistFilled: courseWaitlistFilled,
+      };
+    });
+    return statsMap;
+  }, [todayCourses, bookings, waitlists]);
+
+  const toggleBookingSelection = (bookingId: string) => {
+    setSelectedBookingIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(bookingId)) {
+        next.delete(bookingId);
+      } else {
+        next.add(bookingId);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectAllBooked = () => {
+    const bookedBookings = selectedCourseAllBookings.filter((b) => b.status === '已预约');
+    const allSelected = bookedBookings.every((b) => selectedBookingIds.has(b.id));
+    if (allSelected) {
+      setSelectedBookingIds(new Set());
+    } else {
+      setSelectedBookingIds(new Set(bookedBookings.map((b) => b.id)));
+    }
+  };
+
+  const handleBatchCheckIn = () => {
+    const ids = Array.from(selectedBookingIds);
+    if (ids.length === 0) return;
+    batchCheckIn(ids);
+    setSelectedBookingIds(new Set());
+    forceUpdate((n) => n + 1);
+  };
+
+  const handleExportCSV = () => {
+    if (!selectedCourse) return;
+    const allBookings = getBookingsByCourse(selectedCourse.id);
+    const waitlistFilled = waitlists.filter((w) => w.courseId === selectedCourse.id && w.status === '已补位');
+
+    const waitlistStudentMap = new Map<string, boolean>();
+    waitlistFilled.forEach((w) => waitlistStudentMap.set(w.studentId, true));
+
+    const rows: string[][] = [];
+    rows.push(['课程名称', '日期', '时间', '学员姓名', '级别', '书体', '签到状态', '预约时间', '签到时间', '补位来源']);
+
+    allBookings.forEach((booking) => {
+      const student = students.find((s) => s.id === booking.studentId);
+      const isFromWaitlist = waitlistStudentMap.has(booking.studentId);
+      rows.push([
+        selectedCourse.title,
+        selectedCourse.date,
+        `${selectedCourse.startTime}-${selectedCourse.endTime}`,
+        student?.name || '未知学员',
+        student?.level || '',
+        student?.targetStyles.join('、') || '',
+        booking.status,
+        booking.bookedAt,
+        booking.checkInAt || '',
+        isFromWaitlist ? '候补补位' : '',
+      ]);
+    });
+
+    const csvContent = rows.map((row) => row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(',')).join('\n');
+    const BOM = '\uFEFF';
+    const blob = new Blob([BOM + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${selectedCourse.title}_到课明细_${selectedCourse.date}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleScanCheckIn = (studentId: string) => {
+    if (!selectedCourse) return;
+    const booking = selectedCourseAllBookings.find(
+      (b) => b.studentId === studentId && b.status === '已预约'
+    );
+    if (booking) {
+      checkIn(booking.id);
+      forceUpdate((n) => n + 1);
+    }
+    setScanModalOpen(false);
+    setScanSearchQuery('');
+  };
+
+  const scanSearchResults = useMemo(() => {
+    if (!scanSearchQuery.trim() || !selectedCourse) return [];
+    const query = scanSearchQuery.trim().toLowerCase();
+    return students.filter(
+      (s) =>
+        s.name.toLowerCase().includes(query) ||
+        s.id.toLowerCase().includes(query)
+    );
+  }, [scanSearchQuery, students, selectedCourse]);
 
   const courseStats = useMemo(() => {
     if (!selectedCourse) return { booked: 0, checkedIn: 0, timeoutReleased: 0, waitlistFilled: 0 };
@@ -300,6 +432,12 @@ export default function Schedule() {
     }));
   };
 
+  const handleOpenCourseDetail = (courseId: string) => {
+    setSelectedCourseId(courseId);
+    setSelectedBookingIds(new Set());
+    setCourseDetailOpen(true);
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -327,6 +465,82 @@ export default function Schedule() {
           )}
         </div>
       </div>
+
+      {activeTab === 'calendar' && (
+        <div className="rounded-2xl border border-ink/10 bg-white shadow-sm overflow-hidden">
+          <div className="flex items-center gap-2 border-b border-ink/10 px-5 py-3">
+            <CalendarDays className="h-5 w-5 text-cinnabar" />
+            <h2 className="font-semibold text-ink">今天到课总览（{today}）</h2>
+          </div>
+          <div className="p-4">
+            {todayCourses.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-ink/10 p-8 text-center text-sm text-ink/40">
+                今日暂无课程
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {Object.entries(todayCoursesByClassroom).map(([classroomId, courses]) => {
+                  const classroom = classrooms.find((c) => c.id === classroomId);
+                  return (
+                    <div key={classroomId}>
+                      <div className="flex items-center gap-1.5 mb-2">
+                        <Building2 className="h-4 w-4 text-ink/50" />
+                        <span className="text-sm font-medium text-ink">
+                          {classroom?.name || '未命名教室'}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                        {courses.map((course) => {
+                          const stats = getCourseStatsForOverview[course.id];
+                          const color = getCourseColor(course.style);
+                          return (
+                            <button
+                              key={course.id}
+                              onClick={() => handleOpenCourseDetail(course.id)}
+                              className={cn(
+                                'text-left rounded-xl border p-3 transition-all hover:shadow-md',
+                                color.border,
+                                'bg-white hover:bg-ink/[0.02]'
+                              )}
+                            >
+                              <div className="flex items-center justify-between mb-1.5">
+                                <span className={cn('text-sm font-semibold', color.text)}>
+                                  {course.title}
+                                </span>
+                              </div>
+                              <div className="text-xs text-ink/50 mb-2">
+                                {course.startTime} - {course.endTime}
+                              </div>
+                              <div className="grid grid-cols-4 gap-1 text-center text-xs">
+                                <div>
+                                  <div className="font-bold text-ink">{stats.booked}</div>
+                                  <div className="text-ink/40">预约</div>
+                                </div>
+                                <div>
+                                  <div className="font-bold text-bamboo">{stats.checkedIn}</div>
+                                  <div className="text-ink/40">签到</div>
+                                </div>
+                                <div>
+                                  <div className="font-bold text-cinnabar">{stats.timeoutReleased}</div>
+                                  <div className="text-ink/40">释放</div>
+                                </div>
+                                <div>
+                                  <div className="font-bold text-gold">{stats.waitlistFilled}</div>
+                                  <div className="text-ink/40">补位</div>
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="flex gap-1 rounded-xl bg-ink/5 p-1 w-fit">
         <button
@@ -534,8 +748,7 @@ export default function Schedule() {
                               return slotIdx >= startIdx && slotIdx < endIdx;
                             });
                             if (existingCourse) {
-                              setSelectedCourseId(existingCourse.id);
-                              setCourseDetailOpen(true);
+                              handleOpenCourseDetail(existingCourse.id);
                             } else {
                               openNewCourseModal(day.date, TIME_SLOTS[slotIdx]);
                             }
@@ -570,8 +783,7 @@ export default function Schedule() {
                               onMouseLeave={() => setHoveredCourse(null)}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setSelectedCourseId(course.id);
-                                setCourseDetailOpen(true);
+                                handleOpenCourseDetail(course.id);
                               }}
                             >
                               <div className="truncate text-sm font-semibold">
@@ -980,6 +1192,41 @@ export default function Schedule() {
               </div>
             </div>
 
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={handleBatchCheckIn}
+                disabled={selectedBookingIds.size === 0}
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-medium transition-colors',
+                  selectedBookingIds.size > 0
+                    ? 'bg-bamboo text-white hover:bg-bamboo/90'
+                    : 'bg-ink/10 text-ink/30 cursor-not-allowed'
+                )}
+              >
+                <UserCheck className="h-4 w-4" />
+                批量签到
+              </button>
+              <button
+                onClick={() => setScanModalOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-ink px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-ink/90"
+              >
+                <QrCode className="h-4 w-4" />
+                扫码签到
+              </button>
+              <button
+                onClick={handleExportCSV}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-ink/10 bg-white px-4 py-2 text-sm font-medium text-ink transition-colors hover:bg-ink/5"
+              >
+                <Download className="h-4 w-4" />
+                导出到课明细
+              </button>
+              {selectedBookingIds.size > 0 && (
+                <span className="ml-auto text-sm text-cinnabar font-medium">
+                  已选 {selectedBookingIds.size} 人
+                </span>
+              )}
+            </div>
+
             <div className="grid grid-cols-4 gap-3">
               <button
                 onClick={() => setCourseDetailTab('booked')}
@@ -1079,6 +1326,18 @@ export default function Schedule() {
                 </button>
               </div>
 
+              {courseDetailTab === 'booked' && getTabBookings.length > 0 && (
+                <label className="flex items-center gap-2 mb-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={getTabBookings.every((b) => selectedBookingIds.has(b.id))}
+                    onChange={toggleSelectAllBooked}
+                    className="h-4 w-4 rounded border-ink/20 text-ink focus:ring-ink/20"
+                  />
+                  <span className="text-sm text-ink/70">全选</span>
+                </label>
+              )}
+
               <div className="space-y-2">
                 {courseDetailTab !== 'waitlist_filled' ? (
                   getTabBookings.length === 0 ? (
@@ -1091,12 +1350,21 @@ export default function Schedule() {
                       const timeout = booking.status === '已预约'
                         ? getTimeoutRemaining(booking.bookedAt, booking.timeoutMinutes)
                         : null;
+                      const isChecked = selectedBookingIds.has(booking.id);
                       return (
                         <div
                           key={booking.id}
                           className="flex items-center justify-between rounded-xl border border-ink/10 bg-white p-3"
                         >
                           <div className="flex items-center gap-3">
+                            {courseDetailTab === 'booked' && (
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={() => toggleBookingSelection(booking.id)}
+                                className="h-4 w-4 rounded border-ink/20 text-ink focus:ring-ink/20"
+                              />
+                            )}
                             <Avatar name={student?.name || ''} size="md" />
                             <div>
                               <p className="font-medium text-ink">
@@ -1179,6 +1447,88 @@ export default function Schedule() {
             </div>
           </div>
         )}
+      </Modal>
+
+      <Modal
+        open={scanModalOpen}
+        onClose={() => {
+          setScanModalOpen(false);
+          setScanSearchQuery('');
+        }}
+        title="扫码签到"
+        className="max-w-md"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-ink/60">
+            请扫描学员二维码或输入学员编号/姓名
+          </p>
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink/40" />
+            <input
+              type="text"
+              value={scanSearchQuery}
+              onChange={(e) => setScanSearchQuery(e.target.value)}
+              placeholder="输入学员编号或姓名搜索"
+              autoFocus
+              className="w-full rounded-xl border border-ink/10 bg-rice/50 pl-10 pr-4 py-2.5 text-sm text-ink placeholder:text-ink/30 focus:border-ink/30 focus:outline-none focus:ring-2 focus:ring-ink/10"
+            />
+          </div>
+          <div className="max-h-64 overflow-y-auto space-y-1">
+            {scanSearchQuery.trim() === '' ? (
+              <div className="rounded-xl border border-dashed border-ink/10 p-6 text-center text-sm text-ink/40">
+                请输入学员编号或姓名进行搜索
+              </div>
+            ) : scanSearchResults.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-ink/10 p-6 text-center text-sm text-ink/40">
+                未找到匹配的学员
+              </div>
+            ) : (
+              scanSearchResults.map((student) => {
+                const booking = selectedCourseAllBookings.find(
+                  (b) => b.studentId === student.id && b.status === '已预约'
+                );
+                const isCheckedIn = selectedCourseAllBookings.find(
+                  (b) => b.studentId === student.id && b.status === '已签到'
+                );
+                const canCheckIn = !!booking;
+                return (
+                  <div
+                    key={student.id}
+                    className="flex items-center justify-between rounded-xl border border-ink/10 bg-white p-3"
+                  >
+                    <div className="flex items-center gap-3">
+                      <Avatar name={student.name} size="sm" />
+                      <div>
+                        <p className="font-medium text-ink text-sm">
+                          {student.name}
+                        </p>
+                        <p className="text-xs text-ink/50">
+                          {student.id} · {student.level}
+                        </p>
+                      </div>
+                    </div>
+                    {isCheckedIn ? (
+                      <span className="inline-flex items-center gap-1 rounded-lg bg-bamboo/10 px-2.5 py-1 text-xs font-medium text-bamboo">
+                        <Check className="h-3.5 w-3.5" />
+                        已签到
+                      </span>
+                    ) : canCheckIn ? (
+                      <button
+                        onClick={() => handleScanCheckIn(student.id)}
+                        className="inline-flex items-center gap-1 rounded-lg bg-bamboo px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-bamboo/90"
+                      >
+                        <UserCheck className="h-3.5 w-3.5" />
+                        签到
+                      </button>
+                    ) : (
+                      <span className="text-xs text-ink/40">未预约</span>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
       </Modal>
     </div>
   );
