@@ -1,4 +1,5 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef, forwardRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   ChevronDown,
   ChevronUp,
@@ -15,6 +16,9 @@ import {
   Clock,
   Trash2,
   Plus,
+  Filter,
+  RefreshCw,
+  Sparkles,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useWaitlistStore } from '@/stores/waitlist';
@@ -179,31 +183,40 @@ function WaitlistItem({
   );
 }
 
-function CourseGroup({
-  course,
-  teacherName,
-  waitlists,
-  expanded,
-  onToggle,
-  students,
-  onNotify,
-  onCancel,
-}: {
-  course: Course;
-  teacherName: string;
-  waitlists: Waitlist[];
-  expanded: boolean;
-  onToggle: () => void;
-  students: Record<string, Student>;
-  onNotify: (id: string) => void;
-  onCancel: (id: string) => void;
-}) {
+const CourseGroup = forwardRef<
+  HTMLDivElement,
+  {
+    course: Course;
+    teacherName: string;
+    waitlists: Waitlist[];
+    expanded: boolean;
+    onToggle: () => void;
+    students: Record<string, Student>;
+    onNotify: (id: string) => void;
+    onCancel: (id: string) => void;
+  }
+>(function CourseGroup(
+  {
+    course,
+    teacherName,
+    waitlists,
+    expanded,
+    onToggle,
+    students,
+    onNotify,
+    onCancel,
+  },
+  ref
+) {
   const activeCount = waitlists.filter(
     (w) => w.status === '等待中' || w.status === '已通知'
   ).length;
 
   return (
-    <div className="overflow-hidden rounded-2xl border border-ink/10 bg-white shadow-sm">
+    <div
+      ref={ref}
+      className="overflow-hidden rounded-2xl border border-ink/10 bg-white shadow-sm"
+    >
       <button
         onClick={onToggle}
         className="flex w-full items-center justify-between gap-4 bg-gradient-to-r from-rice/80 to-white px-5 py-4 text-left transition-all hover:from-rice"
@@ -265,26 +278,35 @@ function CourseGroup({
       )}
     </div>
   );
-}
+});
 
 function NotificationItem({
   notification,
   onConfirm,
   onReject,
   onRead,
+  onClick,
+  showActions,
 }: {
   notification: Notification;
   onConfirm?: () => void;
   onReject?: () => void;
   onRead: () => void;
+  onClick?: () => void;
+  showActions: boolean;
 }) {
   const config = notificationTypeConfig[notification.type];
   const Icon = config.icon;
   const isWaitlist = notification.type === '补位';
 
+  const handleClick = () => {
+    onRead();
+    onClick?.();
+  };
+
   return (
     <div
-      onClick={onRead}
+      onClick={handleClick}
       className={cn(
         'rounded-xl border p-4 transition-all cursor-pointer',
         notification.isRead
@@ -320,7 +342,7 @@ function NotificationItem({
           </p>
           <div className="flex items-center justify-between pt-0.5">
             <span className="text-xs text-ink/40">{notification.createdAt}</span>
-            {isWaitlist && !notification.isRead && (
+            {isWaitlist && showActions && (
               <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
                 <button
                   onClick={onConfirm}
@@ -345,13 +367,21 @@ function NotificationItem({
   );
 }
 
+type WaitTimeFilter = 'all' | '1h' | '24h' | '3d';
+type NotificationFilter = '全部' | '补位' | '系统' | '撮合';
+
 export default function Waitlist() {
+  const navigate = useNavigate();
   const [expandedCourses, setExpandedCourses] = useState<Set<string>>(
     new Set()
   );
   const [registerModal, setRegisterModal] = useState(false);
   const [registerCourseId, setRegisterCourseId] = useState('');
   const [registerStudentId, setRegisterStudentId] = useState('');
+  const [waitTimeFilter, setWaitTimeFilter] = useState<WaitTimeFilter>('all');
+  const [notificationFilter, setNotificationFilter] =
+    useState<NotificationFilter>('全部');
+  const courseRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const waitlists = useWaitlistStore((s) => s.waitlists);
   const joinWaitlist = useWaitlistStore((s) => s.joinWaitlist);
@@ -361,6 +391,10 @@ export default function Waitlist() {
   );
   const leaveWaitlist = useWaitlistStore((s) => s.leaveWaitlist);
   const skipWaitlistEntry = useWaitlistStore((s) => s.skipWaitlistEntry);
+  const batchCancelInvalidWaitlists = useWaitlistStore(
+    (s) => s.batchCancelInvalidWaitlists
+  );
+  const getWaitlistById = useWaitlistStore((s) => s.getWaitlistById);
 
   const notifications = useNotificationStore((s) => s.notifications);
   const pushNotification = useNotificationStore((s) => s.pushNotification);
@@ -386,9 +420,18 @@ export default function Waitlist() {
   );
 
   const waitlistByCourse = useMemo(() => {
+    const now = new Date().getTime();
     const map = new Map<string, Waitlist[]>();
     for (const w of waitlists) {
       if (w.status === '已取消') continue;
+      const joinedTime = new Date(w.joinedAt.replace(' ', 'T')).getTime();
+      const hoursWaited = (now - joinedTime) / (1000 * 60 * 60);
+      const matchesFilter =
+        waitTimeFilter === 'all' ||
+        (waitTimeFilter === '1h' && hoursWaited <= 1) ||
+        (waitTimeFilter === '24h' && hoursWaited <= 24) ||
+        (waitTimeFilter === '3d' && hoursWaited >= 72);
+      if (!matchesFilter) continue;
       if (!map.has(w.courseId)) map.set(w.courseId, []);
       map.get(w.courseId)!.push(w);
     }
@@ -396,17 +439,21 @@ export default function Waitlist() {
       list.sort((a, b) => a.position - b.position);
     }
     return map;
-  }, [waitlists]);
+  }, [waitlists, waitTimeFilter]);
 
   const sortedNotifications = useMemo(() => {
-    return [...notifications].sort((a, b) => {
+    const filtered =
+      notificationFilter === '全部'
+        ? notifications
+        : notifications.filter((n) => n.type === notificationFilter);
+    return [...filtered].sort((a, b) => {
       if (a.isRead !== b.isRead) return a.isRead ? 1 : -1;
       return (
         new Date(b.createdAt.replace(' ', 'T')).getTime() -
         new Date(a.createdAt.replace(' ', 'T')).getTime()
       );
     });
-  }, [notifications]);
+  }, [notifications, notificationFilter]);
 
   const toggleCourse = (courseId: string) => {
     setExpandedCourses((prev) => {
@@ -418,6 +465,97 @@ export default function Waitlist() {
       }
       return next;
     });
+  };
+
+  const expandAndScrollToCourse = (courseId: string) => {
+    setExpandedCourses((prev) => {
+      const next = new Set(prev);
+      next.add(courseId);
+      return next;
+    });
+    setTimeout(() => {
+      const el = courseRefs.current.get(courseId);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }, 50);
+  };
+
+  const setCourseRef = (courseId: string, el: HTMLDivElement | null) => {
+    if (el) {
+      courseRefs.current.set(courseId, el);
+    } else {
+      courseRefs.current.delete(courseId);
+    }
+  };
+
+  const handleBatchNotify = () => {
+    const courseIdsToNotify = new Set<string>();
+    for (const [courseId, courseWaitlists] of waitlistByCourse.entries()) {
+      const hasWaiting = courseWaitlists.some((w) => w.status === '等待中');
+      const isExpanded = expandedCourses.has(courseId);
+      if (isExpanded || hasWaiting) {
+        courseIdsToNotify.add(courseId);
+      }
+    }
+    for (const courseId of courseIdsToNotify) {
+      const notified = notifyFirstInLine(courseId);
+      if (notified) {
+        const student = studentMap[notified.studentId];
+        const course = courses.find((c) => c.id === notified.courseId);
+        if (student && course) {
+          pushNotification(
+            '补位',
+            `${course.title}补位通知`,
+            `学员「${student.name}」已被通知补位，请等待学员确认。`,
+            notified.id
+          );
+        }
+      }
+    }
+  };
+
+  const handleBatchCleanup = () => {
+    const invalidIds = batchCancelInvalidWaitlists();
+    if (invalidIds.length > 0) {
+      pushNotification(
+        '系统',
+        '批量清理完成',
+        `已清理 ${invalidIds.length} 条超时未响应的候补记录。`,
+      );
+    }
+  };
+
+  const handleNotificationClick = (notification: Notification) => {
+    if (!notification.relatedId) return;
+    if (notification.type === '补位') {
+      const entry = getWaitlistById(notification.relatedId);
+      if (entry) {
+        expandAndScrollToCourse(entry.courseId);
+      }
+    } else if (notification.type === '系统' || notification.type === '撮合') {
+      const relatedId = notification.relatedId;
+      const course = courses.find((c) => c.id === relatedId);
+      if (course) {
+        expandAndScrollToCourse(course.id);
+        return;
+      }
+      const matchCourseFromWaitlist = waitlists.find(
+        (w) => w.id === relatedId
+      );
+      if (matchCourseFromWaitlist) {
+        expandAndScrollToCourse(matchCourseFromWaitlist.courseId);
+      }
+    }
+  };
+
+  const shouldShowNotificationActions = (notification: Notification) => {
+    if (notification.type !== '补位') return false;
+    if (notification.isRead) return false;
+    if (!notification.relatedId) return false;
+    const entry = getWaitlistById(notification.relatedId);
+    if (!entry) return false;
+    return entry.status === '已通知';
   };
 
   const handleNotify = (waitlistId: string) => {
@@ -578,19 +716,52 @@ export default function Waitlist() {
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
           <div className="space-y-4 lg:col-span-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-ink">候补队列</h2>
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-ink/50">
-                  共 {waitlistByCourse.size} 个课程有候补
-                </span>
-                <button
-                  onClick={() => handleOpenRegister()}
-                  className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-cinnabar to-cinnabar/90 px-3.5 py-1.5 text-xs font-medium text-white shadow-sm shadow-cinnabar/20 transition-all hover:shadow-md hover:shadow-cinnabar/30 active:scale-[0.98]"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  登记候补
-                </button>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-3">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <h2 className="text-lg font-semibold text-ink">候补队列</h2>
+                  <span className="text-xs text-ink/50">
+                    共 {waitlistByCourse.size} 个课程有候补
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <div className="flex items-center gap-1.5 rounded-lg border border-ink/15 bg-white px-2 py-1">
+                    <Filter className="h-3.5 w-3.5 text-ink/50" />
+                    <select
+                      value={waitTimeFilter}
+                      onChange={(e) =>
+                        setWaitTimeFilter(e.target.value as WaitTimeFilter)
+                      }
+                      className="bg-transparent text-xs text-ink/70 focus:outline-none cursor-pointer pr-1"
+                    >
+                      <option value="all">全部</option>
+                      <option value="1h">1小时内</option>
+                      <option value="24h">24小时内</option>
+                      <option value="3d">3天以上</option>
+                    </select>
+                  </div>
+                  <button
+                    onClick={handleBatchNotify}
+                    className="flex items-center gap-1.5 rounded-lg border border-gold/30 bg-gold/10 px-3 py-1.5 text-xs font-medium text-gold transition-all hover:bg-gold/15"
+                  >
+                    <Megaphone className="h-3.5 w-3.5" />
+                    一键通知下一位
+                  </button>
+                  <button
+                    onClick={handleBatchCleanup}
+                    className="flex items-center gap-1.5 rounded-lg border border-ink/15 bg-white px-3 py-1.5 text-xs font-medium text-ink/60 transition-all hover:border-cinnabar/30 hover:bg-cinnabar/5 hover:text-cinnabar"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    批量清理无效候补
+                  </button>
+                  <button
+                    onClick={() => handleOpenRegister()}
+                    className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-cinnabar to-cinnabar/90 px-3.5 py-1.5 text-xs font-medium text-white shadow-sm shadow-cinnabar/20 transition-all hover:shadow-md hover:shadow-cinnabar/30 active:scale-[0.98]"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    登记候补
+                  </button>
+                </div>
               </div>
             </div>
             {Array.from(waitlistByCourse.entries()).length === 0 ? (
@@ -610,6 +781,7 @@ export default function Waitlist() {
                     return (
                       <CourseGroup
                         key={courseId}
+                        ref={(el) => setCourseRef(courseId, el)}
                         course={course}
                         teacherName={teacher?.name || '未分配'}
                         waitlists={courseWaitlists}
@@ -653,7 +825,26 @@ export default function Waitlist() {
                 </button>
               </div>
 
-              <div className="space-y-3 max-h-[calc(100vh-240px)] overflow-y-auto pr-1">
+              <div className="flex gap-1 rounded-xl bg-ink/[0.04] p-1">
+                {(['全部', '补位', '系统', '撮合'] as NotificationFilter[]).map(
+                  (tab) => (
+                    <button
+                      key={tab}
+                      onClick={() => setNotificationFilter(tab)}
+                      className={cn(
+                        'flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-all',
+                        notificationFilter === tab
+                          ? 'bg-white text-ink shadow-sm'
+                          : 'text-ink/50 hover:text-ink/70'
+                      )}
+                    >
+                      {tab}
+                    </button>
+                  )
+                )}
+              </div>
+
+              <div className="space-y-3 max-h-[calc(100vh-290px)] overflow-y-auto pr-1">
                 {sortedNotifications.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-ink/15 bg-white/60 py-16 text-center">
                     <Bell className="mx-auto mb-3 h-12 w-12 text-ink/20" />
@@ -667,6 +858,8 @@ export default function Waitlist() {
                       onRead={() => !n.isRead && markAsRead(n.id)}
                       onConfirm={() => handleConfirmNotification(n)}
                       onReject={() => handleRejectNotification(n)}
+                      onClick={() => handleNotificationClick(n)}
+                      showActions={shouldShowNotificationActions(n)}
                     />
                   ))
                 )}

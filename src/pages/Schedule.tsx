@@ -21,6 +21,8 @@ import { useClassroomStore } from '@/stores/classroom';
 import { useTeacherStore } from '@/stores/teacher';
 import { useBookingStore } from '@/stores/booking';
 import { useStudentStore } from '@/stores/student';
+import { useWaitlistStore } from '@/stores/waitlist';
+import { checkAndReleaseBookings } from '@/utils/scheduler';
 import Modal from '@/components/Modal';
 import StatusBadge from '@/components/StatusBadge';
 import Avatar from '@/components/Avatar';
@@ -73,16 +75,20 @@ type CourseFormData = {
   maxStudents: number;
 };
 
+type CourseDetailTab = 'booked' | 'checked_in' | 'timeout_released' | 'waitlist_filled';
+
 export default function Schedule() {
   const [activeTab, setActiveTab] = useState<TabType>('calendar');
   const [weekOffset, setWeekOffset] = useState(0);
   const [, forceUpdate] = useState(0);
+  const [courseDetailTab, setCourseDetailTab] = useState<CourseDetailTab>('booked');
 
   const { courses, addCourse, getWeekCourses } = useCourseStore();
   const { classrooms, addClassroom, updateClassroom, deleteClassroom, toggleActive } = useClassroomStore();
   const { teachers } = useTeacherStore();
-  const { bookings, createBooking, checkIn, getActiveBookingsByCourse, checkAndReleaseTimeoutBookings } = useBookingStore();
+  const { bookings, createBooking, checkIn, getActiveBookingsByCourse, getBookingsByCourse } = useBookingStore();
   const { students } = useStudentStore();
+  const { waitlists } = useWaitlistStore();
 
   const [classroomModalOpen, setClassroomModalOpen] = useState(false);
   const [editingClassroom, setEditingClassroom] = useState<string | null>(null);
@@ -104,11 +110,11 @@ export default function Schedule() {
 
   useEffect(() => {
     const timer = setInterval(() => {
-      checkAndReleaseTimeoutBookings();
+      checkAndReleaseBookings();
       forceUpdate((n) => n + 1);
     }, 1000);
     return () => clearInterval(timer);
-  }, [checkAndReleaseTimeoutBookings]);
+  }, []);
 
   const weekDays = useMemo(() => {
     const base = new Date();
@@ -140,10 +146,38 @@ export default function Schedule() {
     [courses, selectedCourseId]
   );
 
-  const selectedCourseBookings = useMemo(() => {
+  const selectedCourseAllBookings = useMemo(() => {
     if (!selectedCourse) return [];
-    return getActiveBookingsByCourse(selectedCourse.id);
-  }, [selectedCourse, getActiveBookingsByCourse]);
+    return getBookingsByCourse(selectedCourse.id);
+  }, [selectedCourse, getBookingsByCourse]);
+
+  const selectedCourseWaitlistFilled = useMemo(() => {
+    if (!selectedCourse) return [];
+    return waitlists.filter((w) => w.courseId === selectedCourse.id && w.status === '已补位');
+  }, [selectedCourse, waitlists]);
+
+  const courseStats = useMemo(() => {
+    if (!selectedCourse) return { booked: 0, checkedIn: 0, timeoutReleased: 0, waitlistFilled: 0 };
+    return {
+      booked: selectedCourseAllBookings.filter((b) => b.status === '已预约').length,
+      checkedIn: selectedCourseAllBookings.filter((b) => b.status === '已签到').length,
+      timeoutReleased: selectedCourseAllBookings.filter((b) => b.status === '超时释放').length,
+      waitlistFilled: selectedCourseWaitlistFilled.length,
+    };
+  }, [selectedCourse, selectedCourseAllBookings, selectedCourseWaitlistFilled]);
+
+  const getTabBookings = useMemo(() => {
+    switch (courseDetailTab) {
+      case 'booked':
+        return selectedCourseAllBookings.filter((b) => b.status === '已预约');
+      case 'checked_in':
+        return selectedCourseAllBookings.filter((b) => b.status === '已签到');
+      case 'timeout_released':
+        return selectedCourseAllBookings.filter((b) => b.status === '超时释放');
+      default:
+        return [];
+    }
+  }, [courseDetailTab, selectedCourseAllBookings]);
 
   const getCourseColor = (style: string) =>
     STYLE_COLORS[style] || STYLE_COLORS['楷书'];
@@ -941,78 +975,206 @@ export default function Schedule() {
               <div className="rounded-xl border border-ink/10 bg-white p-3">
                 <p className="text-xs text-ink/50">预约情况</p>
                 <p className="mt-1 font-medium text-ink">
-                  {selectedCourseBookings.length} / {selectedCourse.maxStudents} 人
+                  {courseStats.booked + courseStats.checkedIn} / {selectedCourse.maxStudents} 人
                 </p>
               </div>
             </div>
 
+            <div className="grid grid-cols-4 gap-3">
+              <button
+                onClick={() => setCourseDetailTab('booked')}
+                className={cn(
+                  'rounded-xl border p-3 text-center transition-all',
+                  courseDetailTab === 'booked'
+                    ? 'border-cinnabar bg-cinnabar/5'
+                    : 'border-ink/10 bg-white hover:bg-ink/5'
+                )}
+              >
+                <p className="text-2xl font-bold text-ink">{courseStats.booked}</p>
+                <p className="mt-0.5 text-xs text-ink/50">已预约</p>
+              </button>
+              <button
+                onClick={() => setCourseDetailTab('checked_in')}
+                className={cn(
+                  'rounded-xl border p-3 text-center transition-all',
+                  courseDetailTab === 'checked_in'
+                    ? 'border-bamboo bg-bamboo/5'
+                    : 'border-ink/10 bg-white hover:bg-ink/5'
+                )}
+              >
+                <p className="text-2xl font-bold text-ink">{courseStats.checkedIn}</p>
+                <p className="mt-0.5 text-xs text-ink/50">已签到</p>
+              </button>
+              <button
+                onClick={() => setCourseDetailTab('timeout_released')}
+                className={cn(
+                  'rounded-xl border p-3 text-center transition-all',
+                  courseDetailTab === 'timeout_released'
+                    ? 'border-cinnabar bg-cinnabar/5'
+                    : 'border-ink/10 bg-white hover:bg-ink/5'
+                )}
+              >
+                <p className="text-2xl font-bold text-ink">{courseStats.timeoutReleased}</p>
+                <p className="mt-0.5 text-xs text-ink/50">超时释放</p>
+              </button>
+              <button
+                onClick={() => setCourseDetailTab('waitlist_filled')}
+                className={cn(
+                  'rounded-xl border p-3 text-center transition-all',
+                  courseDetailTab === 'waitlist_filled'
+                    ? 'border-bamboo bg-bamboo/5'
+                    : 'border-ink/10 bg-white hover:bg-ink/5'
+                )}
+              >
+                <p className="text-2xl font-bold text-ink">{courseStats.waitlistFilled}</p>
+                <p className="mt-0.5 text-xs text-ink/50">已补位</p>
+              </button>
+            </div>
+
             <div>
-              <h4 className="mb-2.5 flex items-center justify-between">
-                <span className="text-sm font-semibold text-ink">学员列表</span>
-                <span className="text-xs text-ink/50">
-                  共 {selectedCourseBookings.length} 人
-                </span>
-              </h4>
+              <div className="mb-2.5 flex items-center gap-1 rounded-xl bg-ink/5 p-1">
+                <button
+                  onClick={() => setCourseDetailTab('booked')}
+                  className={cn(
+                    'flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-all',
+                    courseDetailTab === 'booked'
+                      ? 'bg-white text-ink shadow-sm'
+                      : 'text-ink/60 hover:text-ink'
+                  )}
+                >
+                  已预约 ({courseStats.booked})
+                </button>
+                <button
+                  onClick={() => setCourseDetailTab('checked_in')}
+                  className={cn(
+                    'flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-all',
+                    courseDetailTab === 'checked_in'
+                      ? 'bg-white text-ink shadow-sm'
+                      : 'text-ink/60 hover:text-ink'
+                  )}
+                >
+                  已签到 ({courseStats.checkedIn})
+                </button>
+                <button
+                  onClick={() => setCourseDetailTab('timeout_released')}
+                  className={cn(
+                    'flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-all',
+                    courseDetailTab === 'timeout_released'
+                      ? 'bg-white text-ink shadow-sm'
+                      : 'text-ink/60 hover:text-ink'
+                  )}
+                >
+                  超时释放 ({courseStats.timeoutReleased})
+                </button>
+                <button
+                  onClick={() => setCourseDetailTab('waitlist_filled')}
+                  className={cn(
+                    'flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-all',
+                    courseDetailTab === 'waitlist_filled'
+                      ? 'bg-white text-ink shadow-sm'
+                      : 'text-ink/60 hover:text-ink'
+                  )}
+                >
+                  已补位 ({courseStats.waitlistFilled})
+                </button>
+              </div>
+
               <div className="space-y-2">
-                {selectedCourseBookings.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-ink/10 p-6 text-center text-sm text-ink/40">
-                  暂无学员预约
-                </div>
-              ) : (
-                selectedCourseBookings.map((booking) => {
-                  const student = students.find((s) => s.id === booking.studentId);
-                  const timeout = booking.status === '已预约'
-                    ? getTimeoutRemaining(booking.bookedAt, booking.timeoutMinutes)
-                    : null;
-                  return (
-                    <div
-                      key={booking.id}
-                      className="flex items-center justify-between rounded-xl border border-ink/10 bg-white p-3"
-                    >
-                      <div className="flex items-center gap-3">
-                        <Avatar name={student?.name || ''} size="md" />
-                        <div>
-                          <p className="font-medium text-ink">
-                            {student?.name || '未知学员'}
-                          </p>
-                          <p className="text-xs text-ink/50">
-                            {student?.level} · {student?.targetStyles.join('、')}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        {timeout && !timeout.expired && (
-                          <div className="flex items-center gap-1.5 rounded-lg bg-gold/10 px-2.5 py-1 text-xs font-medium text-gold">
-                            <Timer className="h-3.5 w-3.5" />
-                            {timeout.minutes}:{timeout.seconds.toString().padStart(2, '0')}
-                          </div>
-                        )}
-                        {timeout && timeout.expired && (
-                          <div className="flex items-center gap-1.5 rounded-lg bg-cinnabar/10 px-2.5 py-1 text-xs font-medium text-cinnabar">
-                            <AlertCircle className="h-3.5 w-3.5" />
-                            即将释放
-                          </div>
-                        )}
-                        <StatusBadge
-                          status={
-                            booking.status === '已签到' ? 'checked_in' :
-                            booking.status === '超时释放' ? 'timeout_released' : 'booked'
-                          }
-                        />
-                        {booking.status === '已预约' && (
-                          <button
-                            onClick={() => handleCheckIn(booking.id)}
-                            className="inline-flex items-center gap-1 rounded-lg bg-bamboo px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-bamboo/90"
-                          >
-                            <UserCheck className="h-3.5 w-3.5" />
-                            签到
-                          </button>
-                        )}
-                      </div>
+                {courseDetailTab !== 'waitlist_filled' ? (
+                  getTabBookings.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-ink/10 p-6 text-center text-sm text-ink/40">
+                      暂无数据
                     </div>
-                  );
-                })
-              )}
+                  ) : (
+                    getTabBookings.map((booking) => {
+                      const student = students.find((s) => s.id === booking.studentId);
+                      const timeout = booking.status === '已预约'
+                        ? getTimeoutRemaining(booking.bookedAt, booking.timeoutMinutes)
+                        : null;
+                      return (
+                        <div
+                          key={booking.id}
+                          className="flex items-center justify-between rounded-xl border border-ink/10 bg-white p-3"
+                        >
+                          <div className="flex items-center gap-3">
+                            <Avatar name={student?.name || ''} size="md" />
+                            <div>
+                              <p className="font-medium text-ink">
+                                {student?.name || '未知学员'}
+                              </p>
+                              <p className="text-xs text-ink/50">
+                                {student?.level} · {student?.targetStyles.join('、')}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            {timeout && !timeout.expired && (
+                              <div className="flex items-center gap-1.5 rounded-lg bg-gold/10 px-2.5 py-1 text-xs font-medium text-gold">
+                                <Timer className="h-3.5 w-3.5" />
+                                {timeout.minutes}:{timeout.seconds.toString().padStart(2, '0')}
+                              </div>
+                            )}
+                            {timeout && timeout.expired && (
+                              <div className="flex items-center gap-1.5 rounded-lg bg-cinnabar/10 px-2.5 py-1 text-xs font-medium text-cinnabar">
+                                <AlertCircle className="h-3.5 w-3.5" />
+                                即将释放
+                              </div>
+                            )}
+                            <StatusBadge
+                              status={
+                                booking.status === '已签到' ? 'checked_in' :
+                                booking.status === '超时释放' ? 'timeout_released' : 'booked'
+                              }
+                            />
+                            {booking.status === '已预约' && (
+                              <button
+                                onClick={() => handleCheckIn(booking.id)}
+                                className="inline-flex items-center gap-1 rounded-lg bg-bamboo px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-bamboo/90"
+                              >
+                                <UserCheck className="h-3.5 w-3.5" />
+                                签到
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )
+                ) : (
+                  selectedCourseWaitlistFilled.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-ink/10 p-6 text-center text-sm text-ink/40">
+                      暂无补位学员
+                    </div>
+                  ) : (
+                    selectedCourseWaitlistFilled.map((waitlist) => {
+                      const student = students.find((s) => s.id === waitlist.studentId);
+                      return (
+                        <div
+                          key={waitlist.id}
+                          className="flex items-center justify-between rounded-xl border border-ink/10 bg-white p-3"
+                        >
+                          <div className="flex items-center gap-3">
+                            <Avatar name={student?.name || ''} size="md" />
+                            <div>
+                              <p className="font-medium text-ink">
+                                {student?.name || '未知学员'}
+                              </p>
+                              <p className="text-xs text-ink/50">
+                                {student?.level} · {student?.targetStyles.join('、')}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs text-ink/50">
+                              加入时间：{waitlist.joinedAt}
+                            </span>
+                            <StatusBadge status="checked_in" />
+                          </div>
+                        </div>
+                      );
+                    })
+                  )
+                )}
               </div>
             </div>
           </div>

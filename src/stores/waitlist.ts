@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { Waitlist, mockWaitlists } from '../mock/data';
+import { useNotificationStore } from './notification';
+import { useCourseStore } from './course';
 
 interface WaitlistState {
   waitlists: Waitlist[];
@@ -13,6 +15,8 @@ interface WaitlistState {
   getWaitlistById: (id: string) => Waitlist | undefined;
   getNextPosition: (courseId: string) => number;
   reorderPositions: (courseId: string) => void;
+  notifyAllFirstInLineForCourses: (courseIds: string[]) => void;
+  batchCancelInvalidWaitlists: (courseId?: string) => string[];
 }
 
 const formatDateTime = (d: Date) =>
@@ -129,6 +133,56 @@ export const useWaitlistStore = create<WaitlistState>()(
         get().waitlists.filter((w) => w.courseId === courseId),
 
       getWaitlistById: (id) => get().waitlists.find((w) => w.id === id),
+
+      notifyAllFirstInLineForCourses: (courseIds) => {
+        const notificationStore = useNotificationStore.getState();
+        const courseStore = useCourseStore.getState();
+        courseIds.forEach((courseId) => {
+          const notified = get().notifyFirstInLine(courseId);
+          if (notified) {
+            const course = courseStore.getCourseById(courseId);
+            const courseTitle = course?.title || `课程${courseId}`;
+            notificationStore.pushNotification(
+              '补位',
+              `${courseTitle}补位通知`,
+              `您已排到${courseTitle}候补队列首位，请在15分钟内确认补位，逾期将自动顺延至下一位。`,
+              notified.id
+            );
+          }
+        });
+      },
+
+      batchCancelInvalidWaitlists: (courseId) => {
+        const now = new Date();
+        const invalidIds: string[] = [];
+        const targetCourseIds = courseId
+          ? [courseId]
+          : Array.from(new Set(get().waitlists.map((w) => w.courseId)));
+        const fifteenMinutesAgo = new Date(now.getTime() - 15 * 60 * 1000);
+
+        set((state) => ({
+          waitlists: state.waitlists.map((w) => {
+            if (courseId && w.courseId !== courseId) return w;
+            if (w.status === '已取消' || w.status === '已补位') return w;
+
+            if (w.status === '已通知' && w.notifiedAt) {
+              const notifiedAt = new Date(w.notifiedAt.replace(' ', 'T'));
+              if (notifiedAt <= fifteenMinutesAgo) {
+                invalidIds.push(w.id);
+                return { ...w, status: '已取消' as const };
+              }
+            }
+
+            return w;
+          }),
+        }));
+
+        targetCourseIds.forEach((cid) => {
+          get().reorderPositions(cid);
+        });
+
+        return invalidIds;
+      },
     }),
     {
       name: 'waitlist-store',

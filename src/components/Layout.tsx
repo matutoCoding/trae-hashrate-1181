@@ -22,7 +22,7 @@ interface LayoutProps {
 const menuItems = [
   { to: '/dashboard', label: '仪表盘', icon: LayoutDashboard },
   { to: '/schedule', label: '课程排期', icon: CalendarDays },
-  { to: '/waiting', label: '候补补位', icon: UserRoundPlus },
+  { to: '/waitlist', label: '候补补位', icon: UserRoundPlus },
   { to: '/recommend', label: '多维推荐', icon: Sparkles },
   { to: '/archive', label: '撮合归档', icon: Archive },
 ];
@@ -30,7 +30,7 @@ const menuItems = [
 const breadcrumbMap: Record<string, string> = {
   dashboard: '仪表盘',
   schedule: '课程排期',
-  waiting: '候补补位',
+  waitlist: '候补补位',
   recommend: '多维推荐',
   archive: '撮合归档',
 };
